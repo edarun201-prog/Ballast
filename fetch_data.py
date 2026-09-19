@@ -15,6 +15,7 @@ import argparse
 import os
 import sys
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
@@ -30,6 +31,13 @@ US_ETFS = ["SPY", "TLT", "GLD"]
 FX_TICKER = "TWD=X"  # USD -> TWD
 DEFAULT_START = "2018-01-01"
 DEFAULT_OUT = "prices.csv"
+
+# Benchmarks are yardsticks, never candidates: 0050 is roughly half TSMC and
+# correlates 0.93 with 2330, so as a holding it would be a near-duplicate --
+# but as "what you get for no thought at all" it is exactly the right line to
+# beat.  Kept in their own file so they cannot leak into the universe.
+BENCHMARKS = {"0050.TW": "0050 台灣50"}
+BENCH_OUT = "benchmarks.csv"
 
 
 def fetch_tw(start: str, end: str, token: str | None = None) -> pd.DataFrame:
@@ -57,6 +65,32 @@ def fetch_tw(start: str, end: str, token: str | None = None) -> pd.DataFrame:
         print(f"  {stock_id}: {len(s)} rows {s.index.min():%Y-%m-%d}..{s.index.max():%Y-%m-%d}")
 
     return pd.DataFrame(columns).sort_index()
+
+
+def fetch_benchmarks(start: str, end: str, index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Adjusted closes for the benchmark tickers, aligned to the price table.
+
+    0050 is listed in Taipei and quoted in TWD, so unlike the US ETFs it needs
+    no conversion.
+    """
+    import yfinance as yf
+
+    raw = yf.download(
+        list(BENCHMARKS), start=start, end=end, auto_adjust=True, progress=False
+    )
+    if raw is None or raw.empty:
+        raise RuntimeError("yfinance returned no benchmark data.")
+    close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+    close.index = pd.to_datetime(close.index)
+    if getattr(close.index, "tz", None) is not None:
+        close.index = close.index.tz_localize(None)
+    if not isinstance(close, pd.DataFrame):
+        close = close.to_frame(list(BENCHMARKS)[0])
+
+    out = close.reindex(index).ffill().mask(lambda d: d <= 0).dropna(how="any")
+    for ticker in out.columns:
+        print(f"  {ticker}: {len(out)} rows aligned")
+    return out
 
 
 def fetch_dividends(start: str, end: str, token: str | None = None) -> pd.DataFrame:
@@ -229,6 +263,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     dropped = len(tw) - len(prices)
     print(f"({dropped} Taiwan sessions dropped by the join / zero filter)")
+
+    print("Benchmarks (yfinance)")
+    bench = fetch_benchmarks(args.start, args.end, prices.index)
+    bench.index.name = "date"
+    bench_path = Path(args.out).with_name(BENCH_OUT)
+    bench.to_csv(bench_path, float_format="%.4f")
+    print(f"wrote {bench_path}: {len(bench)} rows x {bench.shape[1]} columns")
     return 0
 
 

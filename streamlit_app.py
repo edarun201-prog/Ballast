@@ -15,6 +15,7 @@ import backtest as bt
 import portfolio as pf
 
 PRICES = Path(__file__).parent / "prices.csv"
+BENCHMARKS = Path(__file__).parent / "benchmarks.csv"
 
 # Validated two-colour set (dataviz six-checks, light and dark).
 SERIES = {"light": "#2a78d6", "dark": "#3987e5"}
@@ -29,10 +30,13 @@ DIVERGING = {"light": ["#2a78d6", "#f0efec", "#e34948"],
              "dark": ["#3987e5", "#2a2e39", "#e66767"]}
 SURFACE = {"light": "#ffffff", "dark": "#1b1f2b"}   # panel the charts sit on
 GRID = {"light": "#e8e8e5", "dark": "#2a2e39"}      # recessive gridlines
-# Four equity curves: the categorical theme's first four slots, in order.
-# Validated on the adjacent pairlist against the panel in both modes.
-LINES = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
-         "dark": ["#3987e5", "#d95926", "#199e70", "#c98500"]}
+# Equity curves: the categorical theme's slots in fixed order, never cycled --
+# a sixth track would fold into "other" rather than reuse a hue.  Validated on
+# the adjacent pairlist against the panel.  Three of the light steps sit under
+# 3:1 on white, which obliges relief: the summary table directly beneath the
+# chart carries every series by name, so identity never rests on colour alone.
+LINES = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"],
+         "dark": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"]}
 
 
 def theme() -> str:
@@ -81,10 +85,13 @@ def refresh_prices(start: str = "2019-01-01") -> str | None:
         tmp.unlink(missing_ok=True)
 
 
-def data_fingerprint() -> tuple[float, int]:
-    """Identify the current prices.csv, so a regenerated file busts the cache."""
-    stat = PRICES.stat()
-    return (stat.st_mtime, stat.st_size)
+def data_fingerprint() -> tuple:
+    """Identify the data files, so regenerating one busts the cache."""
+    stamps = []
+    for file in (PRICES, BENCHMARKS):
+        stamps.append((file.stat().st_mtime, file.stat().st_size)
+                      if file.exists() else (0.0, 0))
+    return tuple(stamps)
 
 
 # The fingerprint is a real (hashed) argument, not an underscore-prefixed one:
@@ -222,6 +229,11 @@ def equity_chart(tracks, ramp: list[str]) -> alt.Chart:
         )
     df = pd.concat(frames)
     names = [t.name for t in tracks]
+    if len(names) > len(ramp):
+        raise ValueError(
+            f"{len(names)} tracks but {len(ramp)} validated hues; extend the "
+            "palette deliberately rather than letting Vega recycle one."
+        )
     return (
         alt.Chart(df)
         .mark_line(strokeWidth=2)
@@ -612,17 +624,25 @@ with back:
             """
 ###### 怎麼讀這張表
 
-這個模型**最小化變異數**，它沒有在最佳化報酬，也沒有在最佳化 Sharpe。
-所以要看它有沒有做到本分，看的是波動和回撤那兩欄——不是報酬那欄。
+**先看最殘酷的一欄：0050 大贏。** 無腦買台灣 50 的累積報酬是這裡最高的之一，
+而這個最佳化器跑半天贏不過它。這條線放在這裡就是為了讓你看見，不是為了襯托。
 
-等權重的 Sharpe 通常會贏。這不是實作出錯，是
+但再看最大回撤：0050 中間最深跌超過 30%，這個組合跌不到一半。
+**這是兩種不同的產品，不是同一個產品的好壞版本。** 問題不是「哪個報酬高」，
+而是「你有沒有辦法在帳面跌三成的時候不賣掉」——多數人沒有，於是實際拿到的
+報酬遠低於那條曲線。
+
+這個模型**最小化變異數**，它沒有在最佳化報酬，也沒有在最佳化 Sharpe。
+要看它有沒有做到本分，看波動和回撤那兩欄。
+
+等權重的 Sharpe 通常最高。這不是實作出錯，是
 [DeMiguel, Garlappi & Uppal (2009)](https://doi.org/10.1093/rfs/hhm075)
 那個著名結論在這組資料上重現：用歷史平均估期望報酬的誤差太大，
 1/N 這種完全不估計的做法反而難以擊敗。
 
 **換手率那欄要一起看。** 目標報酬拉越高，最佳化越要去追前一個視窗裡剛好表現好的
 標的，換手就越兇。而這張表的所有數字**都沒有扣交易成本**——台股賣出還有 0.3% 證交稅。
-一個換手 11% 的策略和一個換手 2% 的策略，帳面報酬不能直接比。
+一個換手 12% 的策略和一個換手 2% 的策略，帳面報酬不能直接比。
 
 樣本外只有四年多，而且那段期間股市多頭。低波動策略在多頭裡本來就會落後。
 """

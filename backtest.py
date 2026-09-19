@@ -14,8 +14,16 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 import portfolio as pf
+
+NAMES = {"0050.TW": "0050 台灣50"}
+
+# Resolved against this file, never the process cwd: Streamlit is launched from
+# wherever the user happens to be, and a benchmark that silently fails to load
+# just quietly drops a row from the comparison table.
+BENCH_PATH = Path(__file__).resolve().parent / "benchmarks.csv"
 
 LOOKBACK = 156  # weeks of history each solve is allowed to see (~3 years)
 STEP = 4        # weeks held before re-solving (~monthly)
@@ -110,6 +118,28 @@ def buy_and_hold(prices: pd.DataFrame, column: str, lookback: int = LOOKBACK) ->
     return Track(pf.DISPLAY_NAMES.get(column, column), weekly[column])
 
 
+def load_benchmarks(path: str | Path = BENCH_PATH) -> pd.DataFrame | None:
+    """External yardsticks, if fetch_data.py has written them."""
+    file = Path(path)
+    if not file.exists():
+        return None
+    return pd.read_csv(file, index_col=0, parse_dates=True).sort_index()
+
+
+def benchmark_tracks(
+    prices: pd.DataFrame, lookback: int = LOOKBACK, path: str | Path = BENCH_PATH
+) -> list[Track]:
+    """One buy-and-hold track per benchmark, over the same out-of-sample weeks."""
+    bench = load_benchmarks(path)
+    if bench is None or bench.empty:
+        return []
+    aligned = bench.reindex(prices.index).ffill().dropna(how="any")
+    weekly = pf.weekly_returns(aligned).iloc[lookback:]
+    return [
+        Track(NAMES.get(col, col), weekly[col]) for col in weekly.columns
+    ]
+
+
 def compare(
     prices: pd.DataFrame,
     cap: float = 0.30,
@@ -117,8 +147,10 @@ def compare(
     benchmarks: tuple[str, ...] = ("SPY", "2330"),
     **kw,
 ) -> tuple[list[Track], pd.DataFrame]:
-    tracks = [walk_forward(prices, cap, target, **kw), equal_weight(prices)]
-    tracks += [buy_and_hold(prices, c) for c in benchmarks if c in prices.columns]
+    lookback = kw.get("lookback", LOOKBACK)
+    tracks = [walk_forward(prices, cap, target, **kw), equal_weight(prices, lookback)]
+    tracks += benchmark_tracks(prices, lookback)
+    tracks += [buy_and_hold(prices, c, lookback) for c in benchmarks if c in prices.columns]
     table = pd.DataFrame(
         {t.name: summarise(t) for t in tracks}
     ).T
