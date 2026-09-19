@@ -1,5 +1,6 @@
 # Tested on Python 3.11 / 3.12 (the devcontainer image is 3.11).
-streamlit>=1.37
+# streamlit floor is simply the version this was tested on.
+streamlit>=1.64
 cvxpy>=1.5
 numpy>=1.26
 pandas>=2.0
