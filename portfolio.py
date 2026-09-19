@@ -61,20 +61,36 @@ def cap_floor(n: int) -> float:
     return 1.0 / n
 
 
-def max_feasible_return(mu: pd.Series, cap: float) -> float:
-    """Best annual return reachable under sum(w)=1, 0<=w<=cap.
-
-    Greedy: pour the budget into the highest-mu names until the cap stops you.
-    """
+def greedy_weights(mu: pd.Series, cap: float) -> pd.Series:
+    """The highest-return feasible portfolio: fill the best names up to the cap."""
+    weights = pd.Series(0.0, index=mu.index)
     remaining = 1.0
-    total = 0.0
-    for r in sorted(mu.to_numpy(), reverse=True):
+    for name in mu.sort_values(ascending=False, kind="stable").index:
         take = min(cap, remaining)
-        total += take * r
+        weights[name] = take
         remaining -= take
         if remaining <= 1e-12:
             break
-    return float(total)
+    return weights
+
+
+def max_feasible_return(mu: pd.Series, cap: float) -> float:
+    """Best annual return reachable under sum(w)=1, 0<=w<=cap."""
+    w = greedy_weights(mu, cap)
+    return float(mu.to_numpy() @ w.to_numpy())
+
+
+def _top_is_unique(mu: pd.Series, cap: float) -> bool:
+    """False when names tie across the greedy cut-off.
+
+    With a tie the maximum-return portfolio is not unique and the tied names
+    should be mixed by variance -- work only the solver can do.
+    """
+    held = greedy_weights(mu, cap) > 0
+    if held.all():
+        return True
+    worst_held = mu[held].min()
+    return bool(mu[~held].max() < worst_held - 1e-12)
 
 
 @dataclass
@@ -103,8 +119,29 @@ def solve(
         mu'w >= target       return floor (skipped when target is None)
     """
     n = len(mu)
-    if cap < cap_floor(n) - 1e-12:
+    floor = cap_floor(n)
+    if cap < floor - 1e-12:
         return None  # cap and budget contradict; nothing to solve
+
+    if cap <= floor + 1e-9:
+        # The feasible set has collapsed to the single point w = 1/n.  Handing
+        # a degenerate problem to the solver only earns an "inaccurate" warning
+        # for an answer that is already known exactly.
+        weights = pd.Series(np.full(n, floor), index=mu.index)
+        if target is not None and float(mu.to_numpy() @ weights.to_numpy()) < target - 1e-9:
+            return None
+        return _measure(weights, mu, sigma, "optimal")
+
+    if target is not None and _top_is_unique(mu, cap):
+        top = greedy_weights(mu, cap)
+        top_ret = float(mu.to_numpy() @ top.to_numpy())
+        if target > top_ret + 1e-9:
+            return None                      # unreachable, whatever the variance
+        if target >= top_ret - 1e-9:
+            # The return floor pins the solution to a single vertex.  Handing
+            # that to the solver earns an "inaccurate" warning for an answer
+            # already known exactly.
+            return _measure(top, mu, sigma, "optimal")
 
     w = cp.Variable(n, nonneg=True)
     constraints = [cp.sum(w) == 1, w <= cap]
@@ -124,13 +161,18 @@ def solve(
         return None
 
     weights = pd.Series(np.clip(w.value, 0.0, None), index=mu.index)
-    weights = weights / weights.sum()
+    return _measure(weights / weights.sum(), mu, sigma, problem.status)
+
+
+def _measure(
+    weights: pd.Series, mu: pd.Series, sigma: pd.DataFrame, status: str
+) -> Portfolio:
     variance = float(weights.to_numpy() @ sigma.to_numpy() @ weights.to_numpy())
     return Portfolio(
         weights=weights,
         ret=float(mu.to_numpy() @ weights.to_numpy()),
         vol=float(np.sqrt(max(variance, 0.0))),
-        status=problem.status,
+        status=status,
     )
 
 
@@ -153,8 +195,7 @@ def efficient_frontier(
 
     rows = []
     for target in np.linspace(lo, hi, n_points):
-        # Back off the last hair so the top end does not fail on rounding.
-        p = solve(mu, sigma, cap, target=min(target, hi - 1e-10))
+        p = solve(mu, sigma, cap, target=target)
         if p is not None and p.ok:
             rows.append({"ret": p.ret, "vol": p.vol})
     return pd.DataFrame(rows)

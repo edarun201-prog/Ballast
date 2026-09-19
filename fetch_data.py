@@ -123,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("No overlapping trading days survived the join.")
 
     prices.index.name = "date"
-    prices.to_csv(args.out)
+    # Four decimals is far past any real quote; full float repr just makes
+    # the file big and every diff unreadable.
+    prices.to_csv(args.out, float_format="%.4f")
     print(
         f"\nwrote {args.out}: {len(prices)} rows x {prices.shape[1]} columns, "
         f"{prices.index.min():%Y-%m-%d}..{prices.index.max():%Y-%m-%d}"

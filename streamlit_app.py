@@ -16,6 +16,8 @@ PRICES = Path(__file__).parent / "prices.csv"
 # Validated two-colour set (dataviz six-checks, light and dark).
 SERIES = {"light": "#2a78d6", "dark": "#3987e5"}
 ACCENT = {"light": "#eb6834", "dark": "#d95926"}
+INK = {"light": "#52514e", "dark": "#c3c2b7"}       # secondary text
+SURFACE = {"light": "#ffffff", "dark": "#0e1117"}   # Streamlit page background
 
 
 def theme() -> str:
@@ -38,7 +40,7 @@ def frontier(mu: pd.Series, sigma: pd.DataFrame, cap: float) -> pd.DataFrame:
     return pf.efficient_frontier(mu, sigma, cap)
 
 
-def weights_chart(weights: pd.Series, color: str) -> alt.Chart:
+def weights_chart(weights: pd.Series, color: str, ink: str) -> alt.Chart:
     df = pd.DataFrame(
         {
             "資產": [pf.DISPLAY_NAMES.get(k, k) for k in weights.index],
@@ -61,13 +63,16 @@ def weights_chart(weights: pd.Series, color: str) -> alt.Chart:
     )
     bars = base.mark_bar(color=color, cornerRadiusEnd=4, height=16)
     # Direct labels: eight rows is few enough to label every one.
-    labels = base.mark_text(align="left", dx=6, fontSize=12).encode(
+    labels = base.mark_text(align="left", dx=6, fontSize=12, color=ink).encode(
         text=alt.Text("權重:Q", format=".1%")
     )
-    return (bars + labels).properties(height=max(220, 34 * len(df)))
+    return (bars + labels).properties(width="container", height=max(220, 34 * len(df)))
 
 
-def frontier_chart(curve: pd.DataFrame, point: pf.Portfolio, color: str, accent: str):
+def frontier_chart(
+    curve: pd.DataFrame, point: pf.Portfolio, color: str, accent: str,
+    ink: str, surface: str,
+):
     line = (
         alt.Chart(curve)
         .mark_line(color=color, strokeWidth=2)
@@ -94,7 +99,7 @@ def frontier_chart(curve: pd.DataFrame, point: pf.Portfolio, color: str, accent:
     dot = (
         alt.Chart(here)
         .mark_point(
-            size=110, filled=True, color=accent, stroke="white", strokeWidth=2
+            size=110, filled=True, color=accent, stroke=surface, strokeWidth=2
         )
         .encode(
             x="vol:Q",
@@ -108,10 +113,10 @@ def frontier_chart(curve: pd.DataFrame, point: pf.Portfolio, color: str, accent:
     )
     tag = (
         alt.Chart(here)
-        .mark_text(align="left", dx=12, dy=-2, fontSize=12, color=accent)
+        .mark_text(align="left", dx=12, dy=-2, fontSize=12, color=ink)
         .encode(x="vol:Q", y="ret:Q", text="標記:N")
     )
-    return (line + dot + tag).properties(height=380)
+    return (line + dot + tag).properties(width="container", height=380)
 
 
 st.set_page_config(page_title="Ballast", page_icon="⚖️", layout="wide")
@@ -129,6 +134,7 @@ prices, weekly, mu, sigma = load()
 n = len(mu)
 mode = theme()
 color, accent = SERIES[mode], ACCENT[mode]
+ink, surface = INK[mode], SURFACE[mode]
 
 # --- controls -------------------------------------------------------------
 # The cap floor is 1/n: below it the cap and sum(w)==1 contradict each other
@@ -158,8 +164,10 @@ hi = math.floor(pf.max_feasible_return(mu, cap) * 1000) / 10   # 上限：貪婪
 
 with right:
     if hi - lo < 0.05:
-        st.slider("目標年化報酬", min_value=lo, max_value=lo, value=lo, disabled=True,
-                  format="%.1f%%", help="c 剛好等於 1/n，只有等權重一種解。")
+        # c == 1/n: equal weights is the only feasible portfolio, so there is
+        # no range to slide over.  A slider with min_value == max_value is a
+        # degenerate range -- show the fixed number instead of rendering one.
+        st.metric("目標年化報酬", f"{lo:.1f}%", help="c 剛好等於 1/n，只有等權重一種解。")
         target_pct = lo
     else:
         target_pct = st.slider(
@@ -186,7 +194,7 @@ m3.metric("報酬 / 風險", f"{result.ret / result.vol:.2f}" if result.vol else
 chart_left, chart_right = st.columns([1, 1.15])
 with chart_left:
     st.subheader("最佳權重")
-    st.altair_chart(weights_chart(result.weights, color), use_container_width=True)
+    st.altair_chart(weights_chart(result.weights, color, ink))
 with chart_right:
     st.subheader("效率前緣")
     curve = frontier(mu, sigma, cap)
@@ -194,7 +202,7 @@ with chart_right:
         st.info("目前的上限下只有單一可行解。")
     else:
         st.altair_chart(
-            frontier_chart(curve, result, color, accent), use_container_width=True
+            frontier_chart(curve, result, color, accent, ink, surface)
         )
 
 with st.expander("為什麼用週報酬，不用日報酬"):
@@ -231,7 +239,6 @@ with st.expander("資料表"):
         table.style.format(
             {"權重": "{:.2%}", "年化報酬": "{:.2%}", "年化波動": "{:.2%}"}
         ),
-        use_container_width=True,
         hide_index=True,
     )
     st.caption(
