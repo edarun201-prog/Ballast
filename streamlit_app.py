@@ -21,9 +21,13 @@ ACCENT = {"light": "#eb6834", "dark": "#d95926"}
 INK = {"light": "#52514e", "dark": "#c3c2b7"}       # secondary text
 # Diverging pair for correlation: warm/cool poles with a GREY midpoint, so
 # "uncorrelated" reads as nothing rather than as a third colour.
+# The dark midpoint is the terminal's own border step rather than the warm grey
+# the reference palette ships: on a cool blue-black panel a warm neutral reads
+# as dirt, and "no correlation" should sink into the panel, not sit on it.
 DIVERGING = {"light": ["#2a78d6", "#f0efec", "#e34948"],
-             "dark": ["#3987e5", "#383835", "#e66767"]}
-SURFACE = {"light": "#ffffff", "dark": "#0e1117"}   # Streamlit page background
+             "dark": ["#3987e5", "#2a2e39", "#e66767"]}
+SURFACE = {"light": "#ffffff", "dark": "#1b1f2b"}   # panel the charts sit on
+GRID = {"light": "#e8e8e5", "dark": "#2a2e39"}      # recessive gridlines
 
 
 def theme() -> str:
@@ -122,6 +126,37 @@ def weights_chart(weights: pd.Series, color: str, ink: str) -> alt.Chart:
         text=alt.Text("權重:Q", format=".1%")
     )
     return (bars + labels).properties(width="container", height=max(220, 34 * len(df)))
+
+
+def terminal(chart, ink: str, grid: str):
+    """Recessive axes and gridlines, applied at the top level of every chart.
+
+    Trading screens keep the chrome quiet and let the marks carry the page:
+    no axis domain lines, hairline grid, labels in muted ink.  Numbers use
+    tabular figures so columns of digits line up instead of shimmering.
+    """
+    return (
+        chart.configure_view(strokeWidth=0)
+        .configure_axis(
+            grid=True,
+            gridColor=grid,
+            gridWidth=1,
+            domain=False,
+            tickColor=grid,
+            tickSize=4,
+            labelColor=ink,
+            titleColor=ink,
+            labelFontSize=11,
+            titleFontSize=11,
+            labelFontWeight=400,
+            titleFontWeight=400,
+        )
+        .configure_legend(
+            labelColor=ink, titleColor=ink, labelFontSize=11, titleFontSize=11,
+            symbolStrokeWidth=0,
+        )
+        .configure_text(font="ui-monospace, SFMono-Regular, Menlo, monospace")
+    )
 
 
 def risk_chart(
@@ -250,6 +285,54 @@ def frontier_chart(
 
 
 st.set_page_config(page_title="Ballast", page_icon="⚖️", layout="wide")
+st.markdown(
+    """
+    <style>
+      /* Numbers read as a column of figures, not as prose: tabular digits stop
+         them shimmering when a slider moves and a 1 replaces an 8. */
+      [data-testid="stMetricValue"], [data-testid="stMetricDelta"],
+      [data-testid="stDataFrame"], .stSlider [data-testid="stTickBar"] {
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+      }
+      /* Readings sit in their own panel, the way a terminal boxes its quotes. */
+      [data-testid="stMetric"] {
+        background: #1b1f2b;
+        border: 1px solid #2a2e39;
+        border-radius: 4px;
+        padding: 10px 12px;
+      }
+      [data-testid="stMetricLabel"] p {
+        font-size: 0.72rem;
+        letter-spacing: .06em;
+        color: #787b86;
+        text-transform: uppercase;
+      }
+      [data-testid="stMetricValue"] { font-size: 1.55rem; font-weight: 500; }
+      /* Charts get the same panel treatment so the page reads as tiles. */
+      [data-testid="stVegaLiteChart"] {
+        background: #1b1f2b;
+        border: 1px solid #2a2e39;
+        border-radius: 4px;
+        padding: 8px 10px 4px;
+      }
+      /* Tabs as a terminal's section strip: a hairline rule, no pill chrome. */
+      .stTabs [data-baseweb="tab-list"] {
+        gap: 1.4rem;
+        border-bottom: 1px solid #2a2e39;
+      }
+      .stTabs [data-baseweb="tab"] {
+        padding: 6px 0;
+        font-size: 0.86rem;
+        letter-spacing: .02em;
+      }
+      h1 { letter-spacing: -.02em; }
+      h3, h4, h5, h6 { color: #d1d4dc; letter-spacing: .01em; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("⚖️ Ballast")
 st.caption(
     "台股五檔 + 美股三檔 ETF 的最小變異數投組。價格全部換算成台幣，"
@@ -280,7 +363,7 @@ with action:
 n = len(mu)
 mode = theme()
 color, accent = SERIES[mode], ACCENT[mode]
-ink, surface = INK[mode], SURFACE[mode]
+ink, surface, grid = INK[mode], SURFACE[mode], GRID[mode]
 
 # --- controls -------------------------------------------------------------
 # The cap floor is 1/n: below it the cap and sum(w)==1 contradict each other
@@ -340,7 +423,7 @@ m3.metric("報酬 / 風險", f"{result.ret / result.vol:.2f}" if result.vol else
 chart_left, chart_right = st.columns([1, 1.15])
 with chart_left:
     st.subheader("最佳權重")
-    st.altair_chart(weights_chart(result.weights, color, ink))
+    st.altair_chart(terminal(weights_chart(result.weights, color, ink), ink, grid))
 with chart_right:
     st.subheader("效率前緣")
     curve = frontier(mu, sigma, cap)
@@ -348,7 +431,7 @@ with chart_right:
         st.info("目前的上限下只有單一可行解。")
     else:
         st.altair_chart(
-            frontier_chart(curve, result, color, accent, ink, surface)
+            terminal(frontier_chart(curve, result, color, accent, ink, surface), ink, grid)
         )
 
 plain, advanced, why, data = st.tabs(
@@ -427,14 +510,16 @@ with advanced:
         "風險貢獻是 wᵢ(Σw)ᵢ / w'Σw，加總為 1。最小變異數組合常把大筆資金押在"
         "波動低的標的上，那檔卻只扛了一小部分風險——兩條棒子擺在一起才看得出來。"
     )
-    st.altair_chart(risk_chart(result.weights, rc, color, accent))
+    st.altair_chart(terminal(risk_chart(result.weights, rc, color, accent), ink, grid))
 
     st.markdown("###### 相關係數矩陣（週報酬）")
     st.caption(
         "左上 5×5 是台股彼此，右下 3×3 是美股 ETF 彼此，交叉的區塊就是跨市場。"
         "跨市場那塊明顯比兩個對角區塊淡，這正是分散效果的來源。"
     )
-    st.altair_chart(correlation_chart(weekly.corr(), DIVERGING[mode], ink))
+    st.altair_chart(
+        terminal(correlation_chart(weekly.corr(), DIVERGING[mode], ink), ink, grid)
+    )
 
 with why:
     daily = prices.pct_change().dropna(how="any")

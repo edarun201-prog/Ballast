@@ -1,0 +1,14 @@
+# Trading-terminal palette: a deep blue-black ground with panels a step above
+# it, the way charting desks are laid out. Only long-standing theme keys are
+# set here -- newer ones would break older Streamlit, and the rest of the look
+# is CSS in the app, where a missed selector costs styling rather than a crash.
+[theme]
+base = "dark"
+primaryColor = "#3987e5"
+backgroundColor = "#131722"
+secondaryBackgroundColor = "#1b1f2b"
+textColor = "#d1d4dc"
+font = "sans serif"
+
+[server]
+headless = true
