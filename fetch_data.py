@@ -59,6 +59,93 @@ def fetch_tw(start: str, end: str, token: str | None = None) -> pd.DataFrame:
     return pd.DataFrame(columns).sort_index()
 
 
+def fetch_dividends(start: str, end: str, token: str | None = None) -> pd.DataFrame:
+    """Cash and stock dividends per share, one row per ex-dividend date.
+
+    Cash and stock distributions carry their own ex-dates in the source and are
+    kept apart here, even though in practice they almost always fall together.
+    """
+    from FinMind.data import DataLoader
+
+    loader = DataLoader()
+    if token:
+        loader.login_by_token(api_token=token)
+
+    rows = []
+    for stock_id in TW_STOCKS:
+        df = loader.taiwan_stock_dividend(
+            stock_id=stock_id, start_date=start, end_date=end
+        )
+        if df is None or df.empty:
+            print(f"  {stock_id}: no dividend records")
+            continue
+        for _, r in df.iterrows():
+            cash = float(r["CashEarningsDistribution"]) + float(r["CashStatutorySurplus"])
+            stock = float(r["StockEarningsDistribution"]) + float(r["StockStatutorySurplus"])
+            for ex_date, amount, kind in (
+                (r["CashExDividendTradingDate"], cash, "cash"),
+                (r["StockExDividendTradingDate"], stock, "stock"),
+            ):
+                if not ex_date or amount <= 0:
+                    continue  # blank ex-date or a nil distribution
+                rows.append(
+                    {
+                        "stock_id": stock_id,
+                        "ex_date": pd.to_datetime(ex_date),
+                        "kind": kind,
+                        "amount": amount,
+                    }
+                )
+        n = sum(1 for x in rows if x["stock_id"] == stock_id)
+        print(f"  {stock_id}: {n} distributions")
+
+    return pd.DataFrame(rows, columns=["stock_id", "ex_date", "kind", "amount"])
+
+
+def adjust_for_dividends(prices: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """Back-adjust the Taiwan columns so history is comparable with today.
+
+    FinMind's taiwan_stock_daily is the raw traded price: on an ex-dividend day
+    it simply drops by the distribution, which in a return series looks like a
+    loss even though the holder received the cash.  yfinance already hands back
+    adjusted closes for the US side, so leaving Taiwan raw would bias one half
+    of the universe and not the other.
+
+    On an ex-date the last cum-dividend close P becomes worth
+
+        (P - cash) / (1 + stock / 10)
+
+    to a holder -- cash leaves the price, and a stock dividend quoted in NTD of
+    par splits each share into 1 + stock/10 of them.  Everything before that
+    date is scaled by the resulting ratio, compounded back through time.
+    """
+    if events.empty:
+        return prices
+
+    out = prices.copy()
+    for stock_id, group in events.groupby("stock_id"):
+        if stock_id not in out.columns:
+            continue
+        factors = pd.Series(1.0, index=out.index)
+        for _, ev in group.sort_values("ex_date").iterrows():
+            before = out.index[out.index < ev["ex_date"]]
+            if len(before) == 0:
+                continue  # distribution predates the price history
+            prev = before[-1]
+            close = float(prices.loc[prev, stock_id])
+            if close <= 0:
+                continue
+            if ev["kind"] == "cash":
+                adjusted = close - ev["amount"]
+            else:
+                adjusted = close / (1.0 + ev["amount"] / 10.0)
+            if adjusted <= 0:
+                continue
+            factors.loc[:prev] *= adjusted / close
+        out[stock_id] = out[stock_id] * factors
+    return out
+
+
 def fetch_us(start: str, end: str) -> pd.DataFrame:
     """Adjusted closes for the ETFs plus the USD/TWD rate, in USD."""
     import yfinance as yf
@@ -107,6 +194,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", default=date.today().isoformat())
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument(
+        "--no-adjust",
+        action="store_true",
+        help="Keep Taiwan prices raw (unadjusted for dividends).",
+    )
+    parser.add_argument(
         "--token",
         default=os.environ.get("FINMIND_TOKEN"),
         help="FinMind API token (defaults to $FINMIND_TOKEN).",
@@ -115,6 +207,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Taiwan (FinMind) {args.start}..{args.end}")
     tw = fetch_tw(args.start, args.end, args.token)
+    if not args.no_adjust:
+        print("Dividends (FinMind)")
+        events = fetch_dividends(args.start, args.end, args.token)
+        tw = adjust_for_dividends(tw, events)
+
     print(f"US + FX (yfinance) {args.start}..{args.end}")
     us = fetch_us(args.start, args.end)
 

@@ -11,6 +11,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import backtest as bt
 import portfolio as pf
 
 PRICES = Path(__file__).parent / "prices.csv"
@@ -28,6 +29,10 @@ DIVERGING = {"light": ["#2a78d6", "#f0efec", "#e34948"],
              "dark": ["#3987e5", "#2a2e39", "#e66767"]}
 SURFACE = {"light": "#ffffff", "dark": "#1b1f2b"}   # panel the charts sit on
 GRID = {"light": "#e8e8e5", "dark": "#2a2e39"}      # recessive gridlines
+# Four equity curves: the categorical theme's first four slots, in order.
+# Validated on the adjacent pairlist against the panel in both modes.
+LINES = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
+         "dark": ["#3987e5", "#d95926", "#199e70", "#c98500"]}
 
 
 def theme() -> str:
@@ -92,6 +97,14 @@ def load(fingerprint: tuple[float, int]):
     weekly = pf.weekly_returns(prices)
     mu, sigma = pf.annualise(weekly)
     return prices, weekly, mu, sigma
+
+
+@st.cache_data(show_spinner=False)
+def backtest(fingerprint, cap: float, target: float | None, lookback: int, step: int):
+    tracks, table = bt.compare(
+        pf.load_prices(PRICES), cap, target, lookback=lookback, step=step
+    )
+    return tracks, table
 
 
 @st.cache_data(show_spinner=False)
@@ -195,6 +208,36 @@ def risk_chart(
             ],
         )
         .properties(width="container", height=max(240, 38 * len(weights)))
+    )
+
+
+def equity_chart(tracks, ramp: list[str]) -> alt.Chart:
+    """Growth of 1 for each track, indexed from the first out-of-sample week."""
+    frames = []
+    for track in tracks:
+        curve = track.curve
+        frames.append(
+            pd.DataFrame({"日期": curve.index, "成長": curve.to_numpy(),
+                          "組合": track.name})
+        )
+    df = pd.concat(frames)
+    names = [t.name for t in tracks]
+    return (
+        alt.Chart(df)
+        .mark_line(strokeWidth=2)
+        .encode(
+            x=alt.X("日期:T", title=None),
+            y=alt.Y("成長:Q", title="成長倍數（起點 = 1）",
+                    scale=alt.Scale(zero=False), axis=alt.Axis(format=".1f")),
+            color=alt.Color(
+                "組合:N",
+                scale=alt.Scale(domain=names, range=ramp[: len(names)]),
+                legend=alt.Legend(title=None, orient="top", columns=2),
+            ),
+            tooltip=[alt.Tooltip("日期:T"), alt.Tooltip("組合:N", title=""),
+                     alt.Tooltip("成長:Q", format=".3f")],
+        )
+        .properties(width="container", height=360)
     )
 
 
@@ -434,8 +477,8 @@ with chart_right:
             terminal(frontier_chart(curve, result, color, accent, ink, surface), ink, grid)
         )
 
-plain, advanced, why, data = st.tabs(
-    ["白話說明", "進階指標", "為什麼用週報酬", "資料表"]
+plain, advanced, back, why, data = st.tabs(
+    ["白話說明", "進階指標", "回測", "為什麼用週報酬", "資料表"]
 )
 
 with plain:
@@ -520,6 +563,70 @@ with advanced:
     st.altair_chart(
         terminal(correlation_chart(weekly.corr(), DIVERGING[mode], ink), ink, grid)
     )
+
+with back:
+    st.caption(
+        "上面那組權重是用**全部**歷史算出來的，拿同一段歷史評分等於自己考自己。"
+        "這裡改問另一個問題：如果當年只看得到當下為止的資料、每隔一段時間重新求解一次，"
+        "實際會拿到什麼。每次求解只看前面的視窗，持有期完全在視窗之外，沒有偷看未來。"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        lookback = st.select_slider("求解視窗（週）", [104, 156, 208], value=156)
+    with c2:
+        step = st.select_slider("持有期（週）", [1, 2, 4, 13], value=4)
+    with c3:
+        use_target = st.checkbox(
+            "套用目標報酬", value=False,
+            help="不勾就是純最小變異數；勾了會沿用上面滑桿的目標，並在每個視窗夾進可行範圍。",
+        )
+
+    with st.spinner("逐期重新求解…"):
+        tracks, table = backtest(
+            data_fingerprint(), cap,
+            target_pct / 100.0 if use_target else None, lookback, step,
+        )
+
+    oos = tracks[0].returns
+    if oos.empty:
+        st.warning("這組設定的資料不足以跑出樣本外區間，請縮短求解視窗。")
+    else:
+        st.caption(
+            f"樣本外 {oos.index.min():%Y-%m-%d} ~ {oos.index.max():%Y-%m-%d}，"
+            f"{len(oos)} 週、{len(tracks[0].weights)} 次再平衡"
+        )
+        st.altair_chart(terminal(equity_chart(tracks, LINES[mode]), ink, grid))
+
+        show = table.copy()
+        show.index.name = "組合"
+        st.dataframe(
+            show.reset_index().style.format(
+                {c: "{:.2%}" for c in show.columns if c != "Sharpe"}
+                | {"Sharpe": "{:.2f}"}
+            ),
+            hide_index=True,
+        )
+
+        st.markdown(
+            """
+###### 怎麼讀這張表
+
+這個模型**最小化變異數**，它沒有在最佳化報酬，也沒有在最佳化 Sharpe。
+所以要看它有沒有做到本分，看的是波動和回撤那兩欄——不是報酬那欄。
+
+等權重的 Sharpe 通常會贏。這不是實作出錯，是
+[DeMiguel, Garlappi & Uppal (2009)](https://doi.org/10.1093/rfs/hhm075)
+那個著名結論在這組資料上重現：用歷史平均估期望報酬的誤差太大，
+1/N 這種完全不估計的做法反而難以擊敗。
+
+**換手率那欄要一起看。** 目標報酬拉越高，最佳化越要去追前一個視窗裡剛好表現好的
+標的，換手就越兇。而這張表的所有數字**都沒有扣交易成本**——台股賣出還有 0.3% 證交稅。
+一個換手 11% 的策略和一個換手 2% 的策略，帳面報酬不能直接比。
+
+樣本外只有四年多，而且那段期間股市多頭。低波動策略在多頭裡本來就會落後。
+"""
+        )
 
 with why:
     daily = prices.pct_change().dropna(how="any")
