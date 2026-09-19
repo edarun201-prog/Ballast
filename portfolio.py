@@ -199,3 +199,63 @@ def efficient_frontier(
         if p is not None and p.ok:
             rows.append({"ret": p.ret, "vol": p.vol})
     return pd.DataFrame(rows)
+
+
+# --- diagnostics ----------------------------------------------------------
+# Everything below describes a portfolio that has already been chosen; none of
+# it feeds back into the optimisation.
+
+
+def risk_contributions(weights: pd.Series, sigma: pd.DataFrame) -> pd.Series:
+    """Each holding's share of total portfolio variance, summing to 1.
+
+    RC_i = w_i * (Sigma w)_i / (w' Sigma w).  Worth showing next to the weights:
+    a minimum-variance portfolio routinely puts a big weight on a quiet asset
+    that then carries almost none of the risk, and the two bars make that
+    visible in a way the weights alone never do.
+    """
+    w = weights.to_numpy()
+    marginal = sigma.to_numpy() @ w
+    variance = float(w @ marginal)
+    if variance <= 0:
+        return pd.Series(0.0, index=weights.index)
+    return pd.Series(w * marginal / variance, index=weights.index)
+
+
+def diversification_ratio(weights: pd.Series, sigma: pd.DataFrame) -> float:
+    """Weighted average volatility divided by portfolio volatility.
+
+    1.0 means the holdings move as one and nothing was gained by splitting the
+    money up; higher means the correlations are doing work.
+    """
+    vols = np.sqrt(np.diag(sigma.to_numpy()))
+    w = weights.to_numpy()
+    port_vol = float(np.sqrt(max(w @ sigma.to_numpy() @ w, 0.0)))
+    if port_vol <= 0:
+        return float("nan")
+    return float((w @ vols) / port_vol)
+
+
+def effective_holdings(weights: pd.Series) -> float:
+    """1 / sum(w^2): how many equally-sized positions this behaves like.
+
+    Eight names with one at 90% is not an eight-name portfolio, and this says so.
+    """
+    squared = float((weights.to_numpy() ** 2).sum())
+    return float(1.0 / squared) if squared > 0 else float("nan")
+
+
+def portfolio_returns(weights: pd.Series, returns: pd.DataFrame) -> pd.Series:
+    """Weekly returns of holding these weights, rebalanced every week."""
+    return returns[weights.index] @ weights.to_numpy()
+
+
+def max_drawdown(returns: pd.Series) -> float:
+    """Worst peak-to-trough fall of the cumulative series (a negative number)."""
+    curve = (1.0 + returns).cumprod()
+    return float((curve / curve.cummax() - 1.0).min())
+
+
+def sharpe(ret: float, vol: float, risk_free: float) -> float:
+    """Excess return per unit of volatility."""
+    return float("nan") if vol <= 0 else (ret - risk_free) / vol

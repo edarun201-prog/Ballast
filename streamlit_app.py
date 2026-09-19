@@ -19,6 +19,10 @@ PRICES = Path(__file__).parent / "prices.csv"
 SERIES = {"light": "#2a78d6", "dark": "#3987e5"}
 ACCENT = {"light": "#eb6834", "dark": "#d95926"}
 INK = {"light": "#52514e", "dark": "#c3c2b7"}       # secondary text
+# Diverging pair for correlation: warm/cool poles with a GREY midpoint, so
+# "uncorrelated" reads as nothing rather than as a third colour.
+DIVERGING = {"light": ["#2a78d6", "#f0efec", "#e34948"],
+             "dark": ["#3987e5", "#383835", "#e66767"]}
 SURFACE = {"light": "#ffffff", "dark": "#0e1117"}   # Streamlit page background
 
 
@@ -118,6 +122,81 @@ def weights_chart(weights: pd.Series, color: str, ink: str) -> alt.Chart:
         text=alt.Text("權重:Q", format=".1%")
     )
     return (bars + labels).properties(width="container", height=max(220, 34 * len(df)))
+
+
+def risk_chart(
+    weights: pd.Series, contributions: pd.Series, color: str, accent: str
+) -> alt.Chart:
+    """Weight against risk contribution, one pair of bars per holding."""
+    names = [pf.DISPLAY_NAMES.get(k, k) for k in weights.index]
+    order = [n for _, n in sorted(zip(weights.to_numpy(), names), reverse=True)]
+    df = pd.concat(
+        [
+            pd.DataFrame({"資產": names, "值": weights.to_numpy(), "類別": "權重"}),
+            pd.DataFrame(
+                {"資產": names, "值": contributions.to_numpy(), "類別": "風險貢獻"}
+            ),
+        ]
+    )
+    return (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusEnd=3, height=9)
+        .encode(
+            y=alt.Y("資產:N", sort=order, title=None),
+            yOffset=alt.YOffset("類別:N", sort=["權重", "風險貢獻"]),
+            x=alt.X("值:Q", title=None, axis=alt.Axis(format=".0%", tickCount=6)),
+            # Two series, so a legend is not optional.
+            color=alt.Color(
+                "類別:N",
+                scale=alt.Scale(
+                    domain=["權重", "風險貢獻"], range=[color, accent]
+                ),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip("資產:N"),
+                alt.Tooltip("類別:N", title=""),
+                alt.Tooltip("值:Q", format=".2%"),
+            ],
+        )
+        .properties(width="container", height=max(240, 38 * len(weights)))
+    )
+
+
+def correlation_chart(corr: pd.DataFrame, ramp: list[str], ink: str) -> alt.Chart:
+    """Correlation matrix as a heatmap on a diverging ramp centred at zero."""
+    long = corr.stack().rename("r").reset_index()
+    long.columns = ["A", "B", "r"]
+    for col in ("A", "B"):
+        long[col] = [pf.DISPLAY_NAMES.get(k, k) for k in long[col]]
+    labels = [pf.DISPLAY_NAMES.get(k, k) for k in corr.index]
+
+    base = alt.Chart(long).encode(
+        x=alt.X("A:N", sort=labels, title=None,
+                axis=alt.Axis(labelAngle=-45, labelLimit=120)),
+        y=alt.Y("B:N", sort=labels, title=None, axis=alt.Axis(labelLimit=120)),
+    )
+    cells = base.mark_rect(stroke=None).encode(
+        color=alt.Color(
+            "r:Q",
+            # Domain pinned symmetrically so zero always lands on the neutral.
+            # Interpolating in Lab rather than RGB: straight RGB from the grey
+            # midpoint to the blue pole passes through a desaturated teal, and
+            # a diverging ramp must not invent a third hue.
+            scale=alt.Scale(
+                range=ramp, domain=[-1, 0, 1], type="linear", interpolate="lab"
+            ),
+            legend=alt.Legend(title="相關係數", format=".1f", orient="right"),
+        ),
+        tooltip=[alt.Tooltip("A:N", title=""), alt.Tooltip("B:N", title=""),
+                 alt.Tooltip("r:Q", format=".3f", title="相關係數")],
+    )
+    # Every cell labelled: eight by eight is small enough, and the numbers are
+    # the point -- the colour is only there to make the blocks pop out.
+    text = base.mark_text(fontSize=10, color=ink).encode(
+        text=alt.Text("r:Q", format=".2f")
+    )
+    return (cells + text).properties(width="container", height=340)
 
 
 def frontier_chart(
@@ -272,39 +351,133 @@ with chart_right:
             frontier_chart(curve, result, color, accent, ink, surface)
         )
 
-with st.expander("為什麼用週報酬，不用日報酬"):
+plain, advanced, why, data = st.tabs(
+    ["白話說明", "進階指標", "為什麼用週報酬", "資料表"]
+)
+
+with plain:
+    st.markdown(
+        """
+#### 這個頁面在做什麼
+
+把錢分散到八個標的上，找出「在你要求的報酬之下，**波動最小**」的那一種分法。
+
+為什麼要分散？因為不同資產不會同時漲跌。台積電跌的時候黃金可能在漲，兩個擺在
+一起，整體的起伏會比單押任何一個都小。這個頁面做的就是用數學把「怎麼分最穩」算出來。
+
+#### 兩個滑桿在控制什麼
+
+**單一標的上限 c**　不准把超過這個比例的錢押在同一個標的上。
+
+拉低就是強迫分散，但可選的組合變少；拉高允許集中，數學上波動可以壓得更低，
+但押錯一檔就傷得重。
+
+**目標年化報酬**　你至少要賺多少。這是個**下限**，不是預測。
+
+拉高就必須買進更多高報酬、也更會跳的標的，波動一定跟著上去。
+天下沒有白吃的午餐——那條曲線就是這句話的數字版。
+
+#### 兩張圖怎麼看
+
+**最佳權重**　每個標的該放多少錢，加起來剛好 100%。
+
+**效率前緣**　那條曲線是「每個報酬水準下，最低能做到多少波動」。橘點是你現在的
+設定落在哪裡。往左下走是穩但賺得少，往右上走是賺得多但顛。
+
+曲線的**左上方是空的**——那裡代表「高報酬又低波動」，在這組資料下不存在。
+這不是畫圖偷懶，是數學上真的到不了。
+
+#### 三個數字的意思
+
+- **預期年化報酬**：用過去的平均推估出來的，不是保證。
+- **年化波動度**：漲跌的劇烈程度。8% 大致表示多數年份的報酬會落在「平均加減 8%」的範圍內。
+- **報酬 / 風險**：每扛一單位波動換到多少報酬，越高越划算。
+
+#### 最該記得的一句話
+
+這裡所有「預期報酬」都是拿**歷史平均**當估計值。過去七年台積電漲很多，
+不代表未來會。這個模型對報酬的估計極度敏感，換一段期間、換一組標的，
+結果就會不一樣。
+
+它示範的是最佳化的方法，不是投資建議。
+"""
+    )
+
+with advanced:
+    rf = st.number_input(
+        "無風險利率（年化）", value=1.5, step=0.1, format="%.1f",
+        help="用來算 Sharpe。台灣一年期定存大致在這個區間。",
+    ) / 100.0
+
+    series = pf.portfolio_returns(result.weights, weekly)
+    rc = pf.risk_contributions(result.weights, sigma)
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Sharpe", f"{pf.sharpe(result.ret, result.vol, rf):.2f}",
+              help=f"（年化報酬 − {rf:.1%}）÷ 年化波動")
+    a2.metric("最大回撤", f"{pf.max_drawdown(series):.1%}",
+              help="樣本內：權重是看過這段歷史才選出來的，實際交易不會這麼好看。")
+    a3.metric("分散比率", f"{pf.diversification_ratio(result.weights, sigma):.2f}",
+              help="加權平均波動 ÷ 投組波動。1.00 表示分散完全沒有幫助。")
+    a4.metric("有效持股數", f"{pf.effective_holdings(result.weights):.2f} / {n}",
+              help="1 / Σw²。持有八檔但集中在少數幾檔時，這個數字會遠小於 8。")
+
+    st.markdown("###### 權重 ≠ 風險貢獻")
+    st.caption(
+        "風險貢獻是 wᵢ(Σw)ᵢ / w'Σw，加總為 1。最小變異數組合常把大筆資金押在"
+        "波動低的標的上，那檔卻只扛了一小部分風險——兩條棒子擺在一起才看得出來。"
+    )
+    st.altair_chart(risk_chart(result.weights, rc, color, accent))
+
+    st.markdown("###### 相關係數矩陣（週報酬）")
+    st.caption(
+        "左上 5×5 是台股彼此，右下 3×3 是美股 ETF 彼此，交叉的區塊就是跨市場。"
+        "跨市場那塊明顯比兩個對角區塊淡，這正是分散效果的來源。"
+    )
+    st.altair_chart(correlation_chart(weekly.corr(), DIVERGING[mode], ink))
+
+with why:
     daily = prices.pct_change().dropna(how="any")
     tw = [c for c in prices.columns if c.isdigit()]
     us = [c for c in prices.columns if not c.isdigit()]
-    cross_d = daily.corr().loc[tw, us].to_numpy().mean()
-    cross_w = weekly.corr().loc[tw, us].to_numpy().mean()
     st.markdown(
         f"""
 台北收盤比紐約早約十三個小時，日資料會把台股的今天配到美股的昨天，
 跨市場相關性因此被嚴重低估——最佳化會誤以為兩邊分散效果比實際好很多。
 
-| 資料頻率 | 台股 × 美股平均相關係數 | 年化倍數 |
+| 配對 | 日資料 | 週資料 |
 |---|---|---|
-| 日 | {cross_d:.3f} | 252 |
-| **週（本站採用）** | **{cross_w:.3f}** | **52** |
+| 台股 × 美股（平均） | **{daily.corr().loc[tw, us].to_numpy().mean():+.3f}** | **{weekly.corr().loc[tw, us].to_numpy().mean():+.3f}** |
+| 2330 × SPY | {daily.corr().loc['2330', 'SPY']:+.3f} | {weekly.corr().loc['2330', 'SPY']:+.3f} |
+| 台股內部（平均） | {daily.corr().loc[tw, tw].to_numpy().mean():+.3f} | {weekly.corr().loc[tw, tw].to_numpy().mean():+.3f} |
 
-樣本：{prices.index.min():%Y-%m-%d} ~ {prices.index.max():%Y-%m-%d}，
+關鍵在第三列：**台股內部幾乎沒變**，因為那些標的同時開收盤，沒有錯位問題。
+只有跨市場的配對會暴增——這是時差的指紋，不是「換週資料所有相關性都會上升」。
+
+年化倍數因此是 52，不是 252。
+樣本 {prices.index.min():%Y-%m-%d} ~ {prices.index.max():%Y-%m-%d}，
 {len(prices)} 個共同交易日、{len(weekly)} 週。
 """
     )
 
-with st.expander("資料表"):
+with data:
     table = pd.DataFrame(
         {
             "資產": [pf.DISPLAY_NAMES.get(k, k) for k in mu.index],
             "權重": result.weights.to_numpy(),
+            "風險貢獻": pf.risk_contributions(result.weights, sigma).to_numpy(),
             "年化報酬": mu.to_numpy(),
             "年化波動": sigma.to_numpy().diagonal() ** 0.5,
         }
     ).sort_values("權重", ascending=False)
     st.dataframe(
         table.style.format(
-            {"權重": "{:.2%}", "年化報酬": "{:.2%}", "年化波動": "{:.2%}"}
+            {
+                "權重": "{:.2%}",
+                "風險貢獻": "{:.2%}",
+                "年化報酬": "{:.2%}",
+                "年化波動": "{:.2%}",
+            }
         ),
         hide_index=True,
     )
