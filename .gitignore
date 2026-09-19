@@ -15,6 +15,9 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
+# half-written refresh, if the process dies mid-write
+prices.csv.tmp
+
 # Tooling
 .pytest_cache/
 .ipynb_checkpoints/

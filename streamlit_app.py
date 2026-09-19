@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+from datetime import date
 from pathlib import Path
 
 import altair as alt
@@ -25,6 +27,45 @@ def theme() -> str:
         return st.context.theme.type or "light"
     except Exception:
         return "light"
+
+
+def finmind_token() -> str | None:
+    """Token from Streamlit secrets, falling back to the environment."""
+    try:
+        token = st.secrets.get("FINMIND_TOKEN")
+        if token:
+            return str(token)
+    except Exception:
+        pass  # no secrets.toml at all
+    return os.environ.get("FINMIND_TOKEN")
+
+
+def refresh_prices(start: str = "2019-01-01") -> str | None:
+    """Rebuild prices.csv from the live sources; return an error, or None.
+
+    The new table is written to a temporary file and only moved into place
+    once it is complete.  A failed refresh therefore leaves the committed
+    snapshot untouched -- this is a demo as much as a tool, and one bad
+    network call must never be able to leave it showing an error page.
+    """
+    import fetch_data as fd
+
+    tmp = PRICES.with_suffix(".csv.tmp")
+    try:
+        end = date.today().isoformat()
+        prices = fd.build_prices(
+            fd.fetch_tw(start, end, finmind_token()), fd.fetch_us(start, end)
+        )
+        if prices.empty:
+            return "兩邊沒有重疊的交易日。"
+        prices.index.name = "date"
+        prices.to_csv(tmp, float_format="%.4f")
+        tmp.replace(PRICES)
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def data_fingerprint() -> tuple[float, int]:
@@ -141,6 +182,22 @@ if not PRICES.exists():
     st.stop()
 
 prices, weekly, mu, sigma = load(data_fingerprint())
+
+meta, action = st.columns([4, 1], vertical_alignment="bottom")
+with meta:
+    st.caption(
+        f"資料 {prices.index.min():%Y-%m-%d} ~ {prices.index.max():%Y-%m-%d}　"
+        f"{len(prices)} 個共同交易日、{len(weekly)} 週"
+    )
+with action:
+    if st.button("更新資料", help="重新抓 FinMind 與 yfinance，失敗則保留現有資料。"):
+        with st.spinner("抓取中…"):
+            error = refresh_prices()
+        if error:
+            st.warning(f"更新失敗，沿用現有資料。{error}")
+        else:
+            st.rerun()
+
 n = len(mu)
 mode = theme()
 color, accent = SERIES[mode], ACCENT[mode]

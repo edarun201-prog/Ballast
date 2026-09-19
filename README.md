@@ -79,6 +79,36 @@ export FINMIND_TOKEN=your_token   # Windows: set FINMIND_TOKEN=...
 python fetch_data.py --start 2015-01-01 --end 2026-09-19 --out prices.csv
 ```
 
+## 部署
+
+這是個展品，但要能真的用，所以資料有兩層：
+
+1. **`prices.csv` 有 commit 進 repo**——clone 下來、或雲端第一次開，立刻就有畫面，
+   不需要 token、不需要等抓取。數字是 commit 當下的快照，展示時穩定不會變。
+2. **App 裡有「更新資料」按鈕**——想看最新數字就按，現抓 FinMind 和 yfinance。
+
+### 放上 Streamlit Community Cloud
+
+1. [share.streamlit.io](https://share.streamlit.io) 用 GitHub 帳號登入
+2. New app，選這個 repo、branch `main`、main file `streamlit_app.py`
+3. Advanced settings → Secrets 填（沒有 token 也能跑，免費額度較緊）：
+
+   ```toml
+   FINMIND_TOKEN = "你的 token"
+   ```
+
+### 雲端上「更新資料」的行為
+
+Streamlit Cloud 的檔案系統是**暫時的**。按更新會把新的 `prices.csv` 寫進容器，
+那個 session 和後續訪客都看得到新數字——但容器一重啟（閒置休眠、重新部署）就會消失，
+退回 repo 裡 commit 的那份快照。
+
+對展品來說這反而是好事：**它會自己回到一個已知可用的狀態**，不會因為某次抓取抓到
+爛資料就一直爛下去。想讓快照跟上，重跑 `python fetch_data.py` 然後 commit。
+
+更新失敗（網路斷、FinMind 額度用盡）時，app 顯示警告並沿用現有資料。
+新資料是先寫暫存檔、完整了才換上去的，所以一次失敗的抓取不可能讓畫面壞掉。
+
 ## 檔案
 
 | 檔案 | 內容 |
@@ -86,7 +116,7 @@ python fetch_data.py --start 2015-01-01 --end 2026-09-19 --out prices.csv
 | `fetch_data.py` | 抓資料、換匯、對齊交易日、輸出 `prices.csv` |
 | `portfolio.py` | 週報酬、年化、cvxpy 最佳化與效率前緣（不依賴 Streamlit） |
 | `streamlit_app.py` | 前端介面與圖表 |
-| `prices.csv` | 快取的價格表，全部台幣 |
+| `prices.csv` | 價格快照，全部台幣。有 commit，讓 clone 下來就能跑 |
 
 ## 已知偏誤：台股用未還原股價
 
