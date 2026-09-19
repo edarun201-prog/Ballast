@@ -27,8 +27,18 @@ def theme() -> str:
         return "light"
 
 
+def data_fingerprint() -> tuple[float, int]:
+    """Identify the current prices.csv, so a regenerated file busts the cache."""
+    stat = PRICES.stat()
+    return (stat.st_mtime, stat.st_size)
+
+
+# The fingerprint is a real (hashed) argument, not an underscore-prefixed one:
+# Streamlit leaves those out of the cache key, which is exactly the bug this
+# guards against -- a zero-key cache never notices the file changing underneath
+# a running app.
 @st.cache_data(show_spinner=False)
-def load():
+def load(fingerprint: tuple[float, int]):
     prices = pf.load_prices(PRICES)
     weekly = pf.weekly_returns(prices)
     mu, sigma = pf.annualise(weekly)
@@ -80,13 +90,13 @@ def frontier_chart(
             x=alt.X(
                 "vol:Q",
                 title="年化波動度",
-                axis=alt.Axis(format=".0%"),
+                axis=alt.Axis(format=".0%", tickCount=6),
                 scale=alt.Scale(zero=False, nice=True),
             ),
             y=alt.Y(
                 "ret:Q",
                 title="預期年化報酬",
-                axis=alt.Axis(format=".0%"),
+                axis=alt.Axis(format=".0%", tickCount=6),
                 scale=alt.Scale(zero=False, nice=True),
             ),
             tooltip=[
@@ -130,7 +140,7 @@ if not PRICES.exists():
     st.error("找不到 `prices.csv`。先執行 `python fetch_data.py` 抓取資料。")
     st.stop()
 
-prices, weekly, mu, sigma = load()
+prices, weekly, mu, sigma = load(data_fingerprint())
 n = len(mu)
 mode = theme()
 color, accent = SERIES[mode], ACCENT[mode]
